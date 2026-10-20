@@ -8,6 +8,10 @@ ROM Dashboard - R36S Plus / ArkOS
      o, por WiFi, \\IP-de-la-consola\roms  (en la consola: Options > Enable Remote Services)
    - Carpeta de entrada: donde dejaras los juegos nuevos (por defecto Descargas\ROMs-entrada)
 4. Deja ROMs en la carpeta de entrada, revisa el sistema sugerido y pulsa "Copiar".
+4b. Pulsa "Descargar caratulas" (en Biblioteca). Las busca en libretro-thumbnails y las
+    registra en gamelist.xml (guarda copia en gamelist.xml.bak). Luego, en la consola:
+    Start > Quit > Restart EmulationStation. Para homebrew sin caratula, pon tu imagen en
+    <sistema>\images\<nombre del juego>.png y vuelve a pulsar el boton.
 5. Al terminar, cierra la ventana negra. Expulsa la SD de forma segura antes de sacarla.
 
 Notas

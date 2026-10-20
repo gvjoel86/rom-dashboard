@@ -5,6 +5,7 @@ Dashboard local para Windows que organiza ROMs y BIOS para una consola **R36S Pl
 - Cuenta juegos por sistema en la SD (`EASYROMS`) o por WiFi (`\\IP\roms`).
 - Detecta el sistema de los archivos de una carpeta de entrada y los copia a la carpeta correcta.
 - Comprueba BIOS (nombre exacto y MD5).
+- Descarga carátulas de [libretro-thumbnails](https://thumbnails.libretro.com/) y las registra en `gamelist.xml` sin perder partidas ni favoritos.
 - Avisa de versiones nuevas; se actualiza solo cuando pulsas **Actualizar ahora** (verifica SHA-256).
 
 Solo Python estándar, sin dependencias. Escucha únicamente en `127.0.0.1`.
