@@ -6,6 +6,7 @@ Dashboard local (solo Python estandar, sin dependencias) que:
   - detecta el sistema de los archivos que dejes en una carpeta "Entrada"
     y los copia/mueve a la carpeta correcta,
   - comprueba las BIOS (nombre exacto + MD5),
+  - descarga caratulas de libretro-thumbnails y las registra en gamelist.xml,
   - muestra espacio libre,
   - avisa cuando hay una version nueva en GitHub; con el boton "Actualizar
     ahora" la descarga, verifica su SHA-256 y se reinicia (nunca sin tu clic).
@@ -21,7 +22,10 @@ import re
 import shutil
 import sys
 import threading
+import time
+import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -85,6 +89,7 @@ GENERIC_EXTS = {".zip", ".7z", ".bin", ".iso", ".img", ".chd", ".cue", ".rom"}
 NOT_ROMS = {
     ".xml", ".png", ".jpg", ".jpeg", ".txt", ".cfg", ".srm", ".sav", ".state",
     ".auto", ".db", ".ini", ".log", ".nfo", ".pdf", ".md5", ".dat", ".mp4",
+    ".bak", ".tmp", ".old", ".new",
 }
 SKIP_DIRS = {"bios", "themes", "backup", "videos", "images", "media", "screenshots"}
 
@@ -139,8 +144,8 @@ def md5_of(path):
     return h.hexdigest()
 
 
-def count_roms(folder):
-    """Cuenta juegos en una carpeta de sistema (sin partidas guardadas ni medios).
+def list_roms(folder):
+    """Juegos de una carpeta de sistema (sin partidas guardadas ni medios) y tamano total.
     Los .bin que acompanan a un .cue no cuentan como juego aparte."""
     files = [e for e in os.scandir(folder) if e.is_file() and not e.name.startswith(".")]
     roms = [e for e in files if Path(e.name).suffix.lower() not in NOT_ROMS
@@ -149,7 +154,7 @@ def count_roms(folder):
     if has_cue:
         roms = [e for e in roms if not e.name.lower().endswith(".bin")]
     size = sum(e.stat().st_size for e in files)
-    return len(roms), size
+    return sorted(e.name for e in roms), size
 
 
 def candidates_for(filename, existing):
@@ -178,12 +183,14 @@ def scan(cfg):
                 continue
             existing.add(entry.name)
             try:
-                n, size = count_roms(entry.path)
+                roms, size = list_roms(entry.path)
+                n = len(roms)
+                art = len(covered_roms(entry.path, roms)) if entry.name in ART_SYSTEMS else None
             except OSError as exc:
                 out["errors"].append(f"{entry.name}: {exc}")
                 continue
             label = SYSTEMS.get(entry.name, (entry.name, []))[0]
-            out["systems"].append({"id": entry.name, "label": label, "count": n, "size": size})
+            out["systems"].append({"id": entry.name, "label": label, "count": n, "size": size, "art": art})
         out["bios"] = check_bios(roms_path / "bios")
     elif roms_path:
         out["errors"].append(f"No encuentro la carpeta de ROMs: {roms_path}")
@@ -197,6 +204,7 @@ def scan(cfg):
             out["inbox"].append({"name": entry.name, "size": entry.stat().st_size,
                                  "candidates": cands, "ambiguous": ambiguous})
     out["all_systems"] = sorted(set(SYSTEMS) | existing)
+    out["art_job"] = _art_job
     out["labels"] = {k: v[0] for k, v in SYSTEMS.items()}
     return out
 
@@ -273,6 +281,203 @@ def fix_bios_case(cfg, name, found_as):
     tmp = src.with_name(src.name + ".tmp-rename")
     src.rename(tmp)  # dos pasos: Windows no distingue mayusculas
     tmp.rename(dst)
+
+
+# ---------------------------------------------------------------- caratulas
+# Fuente: libretro-thumbnails (las que usa RetroArch). Gratis y sin cuenta.
+# Los nombres siguen No-Intro/Redump: con ROMs bien nombradas se encuentran casi todas;
+# el homebrew casi nunca esta. Para esos: deja tu propia imagen en
+# <sistema>/images/<nombre del juego>.png y "Descargar caratulas" la registra.
+
+LIBRETRO = "https://thumbnails.libretro.com/"
+ART_SYSTEMS = {
+    "nes": "Nintendo - Nintendo Entertainment System",
+    "fds": "Nintendo - Family Computer Disk System",
+    "snes": "Nintendo - Super Nintendo Entertainment System",
+    "n64": "Nintendo - Nintendo 64",
+    "gb": "Nintendo - Game Boy",
+    "gbc": "Nintendo - Game Boy Color",
+    "gba": "Nintendo - Game Boy Advance",
+    "nds": "Nintendo - Nintendo DS",
+    "virtualboy": "Nintendo - Virtual Boy",
+    "pokemini": "Nintendo - Pokemon Mini",
+    "megadrive": "Sega - Mega Drive - Genesis",
+    "genesis": "Sega - Mega Drive - Genesis",
+    "mastersystem": "Sega - Master System - Mark III",
+    "gamegear": "Sega - Game Gear",
+    "sg-1000": "Sega - SG-1000",
+    "sega32x": "Sega - 32X",
+    "segacd": "Sega - Mega-CD - Sega CD",
+    "dreamcast": "Sega - Dreamcast",
+    "psx": "Sony - PlayStation",
+    "psp": "Sony - PlayStation Portable",
+    "pcengine": "NEC - PC Engine - TurboGrafx 16",
+    "pcenginecd": "NEC - PC Engine CD - TurboGrafx-CD",
+    "atari2600": "Atari - 2600",
+    "atari7800": "Atari - 7800",
+    "atarilynx": "Atari - Lynx",
+    "ngp": "SNK - Neo Geo Pocket",
+    "ngpc": "SNK - Neo Geo Pocket Color",
+    "wonderswan": "Bandai - WonderSwan",
+    "wonderswancolor": "Bandai - WonderSwan Color",
+    "coleco": "Coleco - ColecoVision",
+    "msx": "Microsoft - MSX",
+}
+ART_KINDS = ("Named_Boxarts", "Named_Titles")  # caja; si no hay, pantalla de titulo
+REGION_PREF = ("usa", "world", "europe", "spain", "japan")
+TAG_RE = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]")
+
+_listings = {}
+_art_job = {"running": False, "finished": False, "system": None, "done": 0, "total": 0,
+            "downloaded": 0, "registered": 0, "missing": [], "errors": []}
+
+
+def clean_title(stem):
+    return TAG_RE.sub("", stem).strip()
+
+
+def norm_title(stem):
+    """'The Legend of Zelda (USA)' y 'Legend of Zelda, The (USA)' -> 'legendofzelda'."""
+    t = clean_title(stem).lower().replace("&", "and")
+    t = re.sub(r"^the\s+|,\s*the\b", "", t)
+    return re.sub(r"[^a-z0-9]", "", t)
+
+
+def tags_of(stem):
+    return {x.strip().lower() for g in re.findall(r"\(([^)]*)\)", stem) for x in g.split(",")}
+
+
+def remote_listing(system_name, kind):
+    key = (system_name, kind)
+    if key not in _listings:
+        url = LIBRETRO + urllib.parse.quote(system_name) + "/" + kind + "/"
+        html = fetch(url, timeout=60).decode("utf-8", "replace")
+        names = [urllib.parse.unquote(h) for h in re.findall(r'href="([^"?/]+\.png)"', html)]
+        index = {}
+        for n in names:
+            index.setdefault(norm_title(n[:-4]), []).append(n)
+        _listings[key] = (set(names), index)
+    return _listings[key]
+
+
+def best_match(stem, system_name):
+    """(tipo, archivo remoto) de la mejor caratula, o None."""
+    for kind in ART_KINDS:
+        names, index = remote_listing(system_name, kind)
+        exact = re.sub(r'[&*/:`<>?\\|"]', "_", stem) + ".png"  # asi nombra libretro
+        if exact in names:
+            return kind, exact
+        cands = index.get(norm_title(stem))
+        if cands:
+            want = tags_of(stem)
+
+            def score(n):
+                t = tags_of(n[:-4])
+                region = next((i for i, r in enumerate(REGION_PREF) if r in t), len(REGION_PREF))
+                return (-len(want & t), region, len(t))
+            return kind, min(cands, key=score)
+    return None
+
+
+def read_gamelist(folder):
+    gl = Path(folder) / "gamelist.xml"
+    if not gl.is_file():
+        return None
+    return ET.parse(gl)  # si esta corrupto lanza error y no se toca
+
+
+def covered_roms(folder, roms):
+    """ROMs cuyo gamelist.xml apunta a una imagen que existe."""
+    try:
+        tree = read_gamelist(folder)
+    except (ET.ParseError, OSError):
+        return set()
+    if tree is None:
+        return set()
+    wanted, out = set(roms), set()
+    for g in tree.getroot().findall("game"):
+        rom = (g.findtext("path") or "").replace("\\", "/").rsplit("/", 1)[-1]
+        img = (g.findtext("image") or "").replace("\\", "/")
+        if rom in wanted and img and (Path(folder) / img).is_file():
+            out.add(rom)
+    return out
+
+
+def update_gamelist(folder, entries):
+    """Anade/actualiza <image> sin perder lo demas (partidas, favoritos...).
+    Guarda copia en gamelist.xml.bak."""
+    gl = Path(folder) / "gamelist.xml"
+    tree = read_gamelist(folder)
+    if tree is None:
+        tree = ET.ElementTree(ET.Element("gameList"))
+    else:
+        shutil.copy2(gl, gl.with_name("gamelist.xml.bak"))
+    root = tree.getroot()
+    by_rom = {(g.findtext("path") or "").replace("\\", "/").rsplit("/", 1)[-1]: g
+              for g in root.findall("game")}
+    for rom, image in entries.items():
+        g = by_rom.get(rom)
+        if g is None:
+            g = ET.SubElement(root, "game")
+            ET.SubElement(g, "path").text = "./" + rom
+            ET.SubElement(g, "name").text = clean_title(Path(rom).stem)
+        el = g.find("image")
+        if el is None:
+            el = ET.SubElement(g, "image")
+        el.text = image
+    ET.indent(tree, space="\t")
+    tmp = gl.with_name("gamelist.xml.tmp")
+    tree.write(tmp, encoding="utf-8", xml_declaration=True)
+    os.replace(tmp, gl)
+
+
+def art_worker(roms_path, systems):
+    job = _art_job
+    job.update(running=True, finished=False, system=None, done=0, total=0,
+               downloaded=0, registered=0, missing=[], errors=[])
+    try:
+        work = []
+        for sid in systems:
+            folder = Path(roms_path) / sid
+            if sid not in ART_SYSTEMS or not folder.is_dir():
+                continue
+            roms, _ = list_roms(folder)
+            pending = [r for r in roms if r not in covered_roms(folder, roms)]
+            if pending:
+                work.append((sid, folder, pending))
+        job["total"] = sum(len(p) for _, _, p in work)
+        for sid, folder, pending in work:
+            job["system"] = SYSTEMS.get(sid, (sid,))[0]
+            entries = {}
+            try:
+                for rom in pending:
+                    stem = Path(rom).stem
+                    local = folder / "images" / (stem + ".png")
+                    if not local.is_file():
+                        match = best_match(stem, ART_SYSTEMS[sid])
+                        if match:
+                            kind, remote = match
+                            data = fetch(LIBRETRO + urllib.parse.quote(f"{ART_SYSTEMS[sid]}/{kind}/{remote}"), 30)
+                            if data[:4] == b"\x89PNG":
+                                local.parent.mkdir(exist_ok=True)
+                                local.write_bytes(data)
+                                job["downloaded"] += 1
+                            time.sleep(0.2)  # amable con el servidor de libretro
+                    if local.is_file():
+                        entries[rom] = "./images/" + local.name
+                    else:
+                        job["missing"].append(f"{sid}/{rom}")
+                    job["done"] += 1
+            except Exception as exc:  # noqa: BLE001 — se informa y sigue con otro sistema
+                job["errors"].append(f"{job['system']}: {exc}")
+            if entries:
+                try:
+                    update_gamelist(folder, entries)
+                    job["registered"] += len(entries)
+                except Exception as exc:  # noqa: BLE001
+                    job["errors"].append(f"{job['system']}: gamelist.xml no actualizado ({exc})")
+    finally:
+        job.update(running=False, finished=True, system=None)
 
 
 # ---------------------------------------------------------------- actualizaciones
@@ -411,6 +616,15 @@ class Handler(BaseHTTPRequestHandler):
                     apply_update(m)
                     threading.Timer(0.5, restart).start()
                     return self._send(200, {"updated": True, "version": m["version"]})
+                if self.path == "/api/art/start":
+                    if _art_job["running"]:
+                        return self._send(200, {"ok": True})
+                    if not (cfg["roms_path"] and Path(cfg["roms_path"]).is_dir()):
+                        raise ValueError("Configura primero la carpeta de ROMs.")
+                    systems = body.get("systems") or list(ART_SYSTEMS)
+                    _art_job["running"] = True
+                    threading.Thread(target=art_worker, args=(cfg["roms_path"], systems), daemon=True).start()
+                    return self._send(200, {"ok": True})
                 if self.path == "/api/open":
                     target = cfg.get(body.get("which", ""), "")
                     if target and os.name == "nt" and Path(target).is_dir():

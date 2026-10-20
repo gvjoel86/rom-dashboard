@@ -53,6 +53,11 @@ section .desc { color: var(--muted); font-size: 12.5px; margin: 0 0 12px; }
 .sys .n { text-align: right; font-weight: 600; }
 .sys .sz { text-align: right; color: var(--muted); font-size: 12px; }
 .sys.empty { opacity: .55; }
+.sys .name small .art-ok { color: var(--ok); }
+.artbox { background: var(--chip); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; font-size: 13px; }
+.artbox .meter { margin: 6px 0 2px; }
+.artbox details { margin-top: 6px; color: var(--muted); font-size: 12px; }
+.artbox details ul { margin: 4px 0 0; padding-left: 18px; max-height: 160px; overflow: auto; word-break: break-all; }
 .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; align-items: center; }
 .toolbar label { color: var(--muted); font-size: 12.5px; display: flex; gap: 6px; align-items: center; }
 table { width: 100%; border-collapse: collapse; }
@@ -127,8 +132,10 @@ dialog .help { color: var(--muted); font-size: 12px; margin-top: 4px; }
       <div class="toolbar">
         <label><input type="checkbox" id="showEmpty"> Mostrar carpetas vacías</label>
         <div class="spacer"></div>
+        <button id="artBtn" title="Busca carátulas en libretro-thumbnails y las añade a gamelist.xml">Descargar carátulas</button>
         <button data-open="roms_path">Abrir en Explorador</button>
       </div>
+      <div id="artBox"></div>
       <div id="systems"></div>
     </section>
 
@@ -269,10 +276,12 @@ function render() {
   const max = Math.max(1, ...list.map(x => x.count));
   $("#systems").innerHTML = list.length ? list.map(x => `
     <div class="sys ${x.count ? "" : "empty"}">
-      <div class="name">${esc(x.label)}<small>${esc(x.id)}</small></div>
+      <div class="name">${esc(x.label)}<small>${esc(x.id)}${x.art == null || !x.count ? "" : ` · <span class="${x.art === x.count ? "art-ok" : ""}">${x.art}/${x.count} carátulas</span>`}</small></div>
       <div class="track"><div style="width:${(100 * x.count / max).toFixed(1)}%"></div></div>
       <div class="n">${x.count}</div><div class="sz">${fmtSize(x.size)}</div>
     </div>`).join("") : `<div class="empty-state">${s.connected ? "Aún no hay juegos." : "Conecta la SD para ver la biblioteca."}</div>`;
+
+  renderArt();
 
   // Entrada
   $("#inboxCount").textContent = s.inbox.length;
@@ -302,6 +311,28 @@ function render() {
     </div>`).join("") : '<div class="empty-state">Conecta la SD para revisar las BIOS.</div>';
 }
 
+let artPoll = null;
+function renderArt() {
+  const j = state.art_job, box = $("#artBox");
+  $("#artBtn").disabled = !state.connected || j.running;
+  if (j.running) {
+    const pct = j.total ? (100 * j.done / j.total).toFixed(0) : 0;
+    box.innerHTML = `<div class="artbox">Buscando carátulas${j.system ? " · " + esc(j.system) : ""}… ${j.done} / ${j.total}
+      <div class="meter"><div style="width:${pct}%"></div></div><small>${j.downloaded} descargadas</small></div>`;
+    if (!artPoll) artPoll = setInterval(load, 1500);
+  } else {
+    if (artPoll) { clearInterval(artPoll); artPoll = null; }
+    box.innerHTML = j.finished ? `<div class="artbox">
+      ${j.total ? `Listo: <b>${j.downloaded}</b> carátulas nuevas, ${j.registered} registradas en gamelist.xml.` : "Todos los juegos ya tienen carátula."}
+      ${j.registered ? "<br><small>En la consola: Start → Quit → Restart EmulationStation para verlas.</small>" : ""}
+      ${j.errors.length ? `<br><span class="tag bad">errores</span> ${j.errors.map(esc).join("<br>")}` : ""}
+      ${j.missing.length ? `<details><summary>${j.missing.length} sin carátula (homebrew o nombre no estándar)</summary>
+        Pon tu propia imagen en <code>sistema/images/nombre-del-juego.png</code> y vuelve a pulsar «Descargar carátulas».
+        <ul>${j.missing.map(m => "<li>" + esc(m) + "</li>").join("")}</ul></details>` : ""}
+    </div>` : "";
+  }
+}
+
 async function send(indices) {
   const items = indices.map(i => ({ name: state.inbox[i].name, system: document.querySelector(`select[data-i="${i}"]`).value }));
   const missing = items.filter(x => !x.system);
@@ -320,6 +351,9 @@ document.addEventListener("click", async (ev) => {
   if (t.dataset.open) api("/api/open", { which: t.dataset.open }).catch(e => toast(e.message));
   if (t.dataset.fix) { try { await api("/api/bios/rename", { name: t.dataset.fix, found_as: t.dataset.as }); toast("Nombre corregido"); load(); } catch (e) { toast(e.message); } }
 });
+$("#artBtn").onclick = async () => {
+  try { await api("/api/art/start", {}); load(); } catch (e) { toast("Error: " + e.message); }
+};
 $("#sendAll").onclick = () => send(state.inbox.map((_, i) => i));
 $("#refresh").onclick = load;
 $("#showEmpty").onchange = render;
