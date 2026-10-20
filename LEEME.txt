@@ -12,6 +12,12 @@ ROM Dashboard - R36S Plus / ArkOS
     registra en gamelist.xml (guarda copia en gamelist.xml.bak). Luego, en la consola:
     Start > Quit > Restart EmulationStation. Para homebrew sin caratula, pon tu imagen en
     <sistema>\images\<nombre del juego>.png y vuelve a pulsar el boton.
+4c. Convertir a CHD: si en Entrada hay discos .cue/.bin o .gdi, aparece "Convertir a CHD".
+    Necesita chdman.exe: descarga MAME para Windows (mamedev.org/release.html), abre el .exe
+    (se descomprime solo) y copia chdman.exe a esta carpeta. Los originales se guardan en
+    Entrada\originales-convertidos. Juegos de varios discos: se crea un .m3u; copia el .m3u
+    y todos sus .chd a psx y en la consola abre el .m3u.
+4d. Tienda homebrew: busca juegos gratis de GB/GBC/GBA (Homebrew Hub) y pulsa "Instalar".
 5. Al terminar, cierra la ventana negra. Expulsa la SD de forma segura antes de sacarla.
 
 Notas

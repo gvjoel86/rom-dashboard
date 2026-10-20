@@ -57,6 +57,19 @@ section .desc { color: var(--muted); font-size: 12.5px; margin: 0 0 12px; }
 .artbox { background: var(--chip); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; font-size: 13px; }
 .artbox .meter { margin: 6px 0 2px; }
 .artbox details { margin-top: 6px; color: var(--muted); font-size: 12px; }
+.store-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.store-bar input { flex: 1; min-width: 180px; }
+.store { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; }
+.game { border: 1px solid var(--line); border-radius: 9px; overflow: hidden; display: flex; flex-direction: column; }
+.game .shot { aspect-ratio: 10 / 9; background: var(--chip); display: flex; align-items: center; justify-content: center; }
+.game .shot img { width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; }
+.game .body { padding: 9px 11px 11px; display: flex; flex-direction: column; gap: 4px; flex: 1; }
+.game .t { font-weight: 600; font-size: 13.5px; display: flex; justify-content: space-between; gap: 6px; }
+.game .dev { color: var(--muted); font-size: 12px; }
+.game .d { color: var(--muted); font-size: 12px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.game .act { margin-top: auto; padding-top: 6px; display: flex; gap: 6px; align-items: center; }
+.game .act a { font-size: 12px; color: var(--muted); }
+.pager { display: flex; gap: 8px; align-items: center; justify-content: center; margin-top: 12px; color: var(--muted); }
 .artbox details ul { margin: 4px 0 0; padding-left: 18px; max-height: 160px; overflow: auto; word-break: break-all; }
 .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; align-items: center; }
 .toolbar label { color: var(--muted); font-size: 12.5px; display: flex; gap: 6px; align-items: center; }
@@ -148,6 +161,7 @@ dialog .help { color: var(--muted); font-size: 12px; margin-top: 4px; }
         <div class="spacer"></div>
         <button data-open="inbox_path">Abrir carpeta</button>
       </div>
+      <div id="chdBox"></div>
       <div id="inbox"></div>
     </section>
   </div>
@@ -156,6 +170,19 @@ dialog .help { color: var(--muted); font-size: 12px; margin-top: 4px; }
     <h2>BIOS</h2>
     <p class="desc">Carpeta <code>EASYROMS/bios</code>. Comprueba nombre exacto (Linux distingue mayúsculas) y MD5. Vuelca las BIOS de tus propias consolas.</p>
     <div class="bios" id="bios"></div>
+  </section>
+
+  <section>
+    <h2>Tienda homebrew</h2>
+    <p class="desc">Juegos gratuitos de Game Boy, Game Boy Color y GBA publicados por sus autores en
+      <a href="https://hh.gbdev.io/" target="_blank" rel="noopener">Homebrew Hub</a>. «Instalar» lo copia a la consola con su captura como carátula.</p>
+    <form class="store-bar" id="storeForm">
+      <input type="text" id="storeQ" placeholder="Buscar (p. ej. tobu, puzzle, rpg…)">
+      <select id="storePlat"><option value="">Todos</option><option value="GB">Game Boy</option><option value="GBC">Game Boy Color</option><option value="GBA">Game Boy Advance</option></select>
+      <button class="primary" type="submit">Buscar</button>
+    </form>
+    <div id="store"><div class="empty-state">Pulsa «Buscar» para ver el catálogo.</div></div>
+    <div class="pager" id="storePager"></div>
   </section>
 
   <section>
@@ -183,6 +210,9 @@ dialog .help { color: var(--muted); font-size: 12px; margin-top: 4px; }
   <label for="cfgInbox">Carpeta de entrada (en tu PC)</label>
   <input type="text" id="cfgInbox">
   <div class="help">Se crea si no existe.</div>
+  <label for="cfgChd">chdman.exe (opcional)</label>
+  <input type="text" id="cfgChd" placeholder="Vacío = buscar junto al programa">
+  <div class="help">Para convertir discos a CHD. Viene dentro de MAME para Windows (mamedev.org).</div>
   <label>Actualizaciones</label>
   <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
     <button id="checkUpd">Buscar actualizaciones</button><span class="help" id="updStatus"></span>
@@ -282,6 +312,7 @@ function render() {
     </div>`).join("") : `<div class="empty-state">${s.connected ? "Aún no hay juegos." : "Conecta la SD para ver la biblioteca."}</div>`;
 
   renderArt();
+  renderChd();
 
   // Entrada
   $("#inboxCount").textContent = s.inbox.length;
@@ -333,6 +364,57 @@ function renderArt() {
   }
 }
 
+let chdPoll = null;
+function renderChd() {
+  const j = state.chd_job, c = state.chd_candidates, box = $("#chdBox");
+  if (j.running) {
+    box.innerHTML = `<div class="artbox">Convirtiendo a CHD ${j.done + 1} / ${j.total}: ${esc(j.current || "")}
+      <div class="meter"><div style="width:${j.percent.toFixed(0)}%"></div></div><small>${j.percent.toFixed(1)}% · no cierres la ventana negra</small></div>`;
+    if (!chdPoll) chdPoll = setInterval(load, 1000);
+    return;
+  }
+  if (chdPoll) { clearInterval(chdPoll); chdPoll = null; }
+  let html = "";
+  if (j.finished && (j.converted.length || j.errors.length)) {
+    html += `<div class="artbox">Convertidos: <b>${j.converted.length}</b>${j.saved ? " · ahorrados " + fmtSize(j.saved) : ""}
+      ${j.m3u.length ? "<br>Multidisco: " + j.m3u.map(esc).join(", ") + " (abre el .m3u en la consola)" : ""}
+      ${j.errors.length ? '<br><span class="tag bad">errores</span> ' + j.errors.map(esc).join("<br>") : ""}
+      <br><small>Los originales quedan en Entrada\\originales-convertidos. Ahora copia los .chd (y .m3u) a la consola.</small></div>`;
+  }
+  if (c.length) {
+    html += `<div class="artbox"><b>${c.length}</b> disco(s) .cue/.gdi se pueden convertir a CHD (ocupan menos y ArkOS los lee directamente).
+      <div class="toolbar" style="margin:8px 0 0">${state.chdman
+        ? '<button class="primary" id="chdBtn">Convertir a CHD</button>'
+        : '<span>Falta <b>chdman.exe</b>: descarga MAME para Windows en <a href="https://www.mamedev.org/release.html" target="_blank" rel="noopener">mamedev.org</a>, ábrelo (se descomprime solo) y copia <code>chdman.exe</code> a la carpeta del dashboard.</span>'}</div></div>`;
+  }
+  box.innerHTML = html;
+}
+
+let store = { q: "", platform: "", page: 1 };
+async function searchStore(page = 1) {
+  store.page = page;
+  $("#store").innerHTML = '<div class="empty-state">Buscando…</div>';
+  try {
+    const r = await api("/api/hb/search", store);
+    $("#store").innerHTML = r.items.length ? `<div class="store">${r.items.map(g => `
+      <div class="game">
+        <div class="shot">${g.screenshot ? `<img loading="lazy" src="${esc(g.screenshot)}" alt="">` : ""}</div>
+        <div class="body">
+          <div class="t"><span>${esc(g.title)}</span><span class="tag">${esc(g.platform)}</span></div>
+          ${g.developer ? `<div class="dev">${esc(g.developer)}${g.date ? " · " + esc(g.date.slice(0, 4)) : ""}</div>` : ""}
+          <div class="d">${esc(g.description)}</div>
+          <div class="act">${g.installed ? '<span class="tag ok">instalado</span>'
+            : g.installable ? `<button class="primary" data-install="${esc(g.slug)}" ${state.connected ? "" : "disabled title='Conecta la SD'"}>Instalar</button>`
+            : '<span class="tag">sin descarga directa</span>'}
+            ${g.website ? `<a href="${esc(g.website)}" target="_blank" rel="noopener">web del autor</a>` : ""}</div>
+        </div>
+      </div>`).join("")}</div>` : '<div class="empty-state">Sin resultados.</div>';
+    $("#storePager").innerHTML = r.pages > 1 ? `<button data-page="${r.page - 1}" ${r.page <= 1 ? "disabled" : ""}>‹ Anterior</button>
+      <span>Página ${r.page} de ${r.pages} · ${r.results} juegos</span>
+      <button data-page="${r.page + 1}" ${r.page >= r.pages ? "disabled" : ""}>Siguiente ›</button>` : "";
+  } catch (e) { $("#store").innerHTML = `<div class="empty-state">No se pudo cargar la tienda: ${esc(e.message)}</div>`; $("#storePager").innerHTML = ""; }
+}
+
 async function send(indices) {
   const items = indices.map(i => ({ name: state.inbox[i].name, system: document.querySelector(`select[data-i="${i}"]`).value }));
   const missing = items.filter(x => !x.system);
@@ -347,17 +429,27 @@ async function send(indices) {
 document.addEventListener("click", async (ev) => {
   const t = ev.target.closest("button"); if (!t) return;
   if (t.id === "applyUpd") return applyUpdate();
+  if (t.id === "chdBtn") { t.disabled = true; try { await api("/api/chd/start", {}); load(); } catch (e) { toast("Error: " + e.message); } return; }
+  if (t.dataset.page) return searchStore(+t.dataset.page);
+  if (t.dataset.install) {
+    t.disabled = true; t.textContent = "Instalando…";
+    try { const r = await api("/api/hb/install", { slug: t.dataset.install }); toast("Instalado en " + r.system + ": " + r.installed);
+      t.outerHTML = '<span class="tag ok">instalado</span>'; load(); }
+    catch (e) { t.disabled = false; t.textContent = "Instalar"; toast("Error: " + e.message); }
+    return;
+  }
   if (t.dataset.send) send([+t.dataset.send]);
   if (t.dataset.open) api("/api/open", { which: t.dataset.open }).catch(e => toast(e.message));
   if (t.dataset.fix) { try { await api("/api/bios/rename", { name: t.dataset.fix, found_as: t.dataset.as }); toast("Nombre corregido"); load(); } catch (e) { toast(e.message); } }
 });
+$("#storeForm").onsubmit = (ev) => { ev.preventDefault(); store.q = $("#storeQ").value.trim(); store.platform = $("#storePlat").value; searchStore(1); };
 $("#artBtn").onclick = async () => {
   try { await api("/api/art/start", {}); load(); } catch (e) { toast("Error: " + e.message); }
 };
 $("#sendAll").onclick = () => send(state.inbox.map((_, i) => i));
 $("#refresh").onclick = load;
 $("#showEmpty").onchange = render;
-$("#settingsBtn").onclick = () => { $("#cfgRoms").value = state?.config.roms_path || ""; $("#cfgInbox").value = state?.config.inbox_path || ""; $("#settings").showModal(); };
+$("#settingsBtn").onclick = () => { $("#cfgRoms").value = state?.config.roms_path || ""; $("#cfgInbox").value = state?.config.inbox_path || ""; $("#cfgChd").value = state?.config.chdman_path || ""; $("#settings").showModal(); };
 $("#checkUpd").onclick = async () => {
   $("#updStatus").textContent = "Buscando…";
   try { const r = await api("/api/update/check", {}); state.update = r.update; state.version = r.version; renderUpdate(); }
@@ -365,7 +457,7 @@ $("#checkUpd").onclick = async () => {
 };
 $("#cfgCancel").onclick = () => $("#settings").close();
 $("#cfgSave").onclick = async () => {
-  try { await api("/api/config", { roms_path: $("#cfgRoms").value, inbox_path: $("#cfgInbox").value }); $("#settings").close(); load(); }
+  try { await api("/api/config", { roms_path: $("#cfgRoms").value, inbox_path: $("#cfgInbox").value, chdman_path: $("#cfgChd").value }); $("#settings").close(); load(); }
   catch (e) { toast("Error: " + e.message); }
 };
 window.addEventListener("focus", () => { if (!updating) load(); });  // al volver a la ventana, refresca

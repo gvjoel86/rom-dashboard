@@ -1,9 +1,9 @@
 {
-  "version": "1.1.0",
-  "notes": "Nuevo: carátulas automáticas. Botón «Descargar carátulas» en Biblioteca.",
+  "version": "1.2.0",
+  "notes": "Nuevo: convertir discos a CHD y tienda homebrew (GB/GBC/GBA).",
   "files": {
-    "rom_dashboard.py": "f7d8915e85a733cd9efb7e90f9503cccf404bdc5a3f07bca6e980b4bbafc89a3",
-    "dashboard.html": "8853d594cba04d3ecb5f5f3ac13cf523c624055f6ae773bcd5764e171d680beb",
-    "LEEME.txt": "1fcfb62edcc2c7c08729a8bbccfc3b329c7573f9b6fb407f47600d72feaaf3a7"
+    "rom_dashboard.py": "09aebbfbc63a55c4c5ec31d7ed1a43530b41deebd67512938da832ebea890cfd",
+    "dashboard.html": "801a2f4533cfb8607d9149d2454d52191dddea0de75e519ded1509c24025420a",
+    "LEEME.txt": "9a104877f91d9d0144e20b09970d00149632b7b46db5d8becaa8a97c2a252f65"
   }
 }

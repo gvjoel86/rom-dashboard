@@ -7,6 +7,8 @@ Dashboard local (solo Python estandar, sin dependencias) que:
     y los copia/mueve a la carpeta correcta,
   - comprueba las BIOS (nombre exacto + MD5),
   - descarga caratulas de libretro-thumbnails y las registra en gamelist.xml,
+  - convierte tus volcados .cue/.bin y .gdi a CHD con chdman (y crea .m3u multidisco),
+  - tienda homebrew: explora e instala juegos gratis de GB/GBC/GBA desde Homebrew Hub,
   - muestra espacio libre,
   - avisa cuando hay una version nueva en GitHub; con el boton "Actualizar
     ahora" la descarga, verifica su SHA-256 y se reinicia (nunca sin tu clic).
@@ -20,6 +22,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -42,6 +45,7 @@ DEFAULT_CONFIG = {
     # Ejemplos:  "E:\\"  (SD en el lector)   o   "\\\\192.168.1.50\\roms"  (Samba)
     "roms_path": "",
     "inbox_path": str(Path.home() / "Downloads" / "ROMs-entrada"),
+    "chdman_path": "",  # vacio = buscar chdman.exe junto al programa o en el PATH
 }
 
 # Nombre de carpeta ArkOS -> (nombre legible, extensiones)
@@ -205,6 +209,9 @@ def scan(cfg):
                                  "candidates": cands, "ambiguous": ambiguous})
     out["all_systems"] = sorted(set(SYSTEMS) | existing)
     out["art_job"] = _art_job
+    out["chd_job"] = _chd_job
+    out["chdman"] = bool(find_chdman(cfg))
+    out["chd_candidates"] = chd_candidates(cfg.get("inbox_path"))
     out["labels"] = {k: v[0] for k, v in SYSTEMS.items()}
     return out
 
@@ -415,16 +422,21 @@ def update_gamelist(folder, entries):
     root = tree.getroot()
     by_rom = {(g.findtext("path") or "").replace("\\", "/").rsplit("/", 1)[-1]: g
               for g in root.findall("game")}
-    for rom, image in entries.items():
+    for rom, fields in entries.items():
+        if isinstance(fields, str):
+            fields = {"image": fields}
         g = by_rom.get(rom)
         if g is None:
             g = ET.SubElement(root, "game")
             ET.SubElement(g, "path").text = "./" + rom
-            ET.SubElement(g, "name").text = clean_title(Path(rom).stem)
-        el = g.find("image")
-        if el is None:
-            el = ET.SubElement(g, "image")
-        el.text = image
+            ET.SubElement(g, "name").text = fields.get("name") or clean_title(Path(rom).stem)
+        for key, value in fields.items():
+            if key == "name" or not value:
+                continue
+            el = g.find(key)
+            if el is None:
+                el = ET.SubElement(g, key)
+            el.text = value
     ET.indent(tree, space="\t")
     tmp = gl.with_name("gamelist.xml.tmp")
     tree.write(tmp, encoding="utf-8", xml_declaration=True)
@@ -478,6 +490,216 @@ def art_worker(roms_path, systems):
                     job["errors"].append(f"{job['system']}: gamelist.xml no actualizado ({exc})")
     finally:
         job.update(running=False, finished=True, system=None)
+
+
+# ---------------------------------------------------------------- conversion a CHD
+# chdman viene con MAME (gratis). PCSX-ReARMed/SwanStation de ArkOS leen .chd,
+# y los juegos de varios discos se lanzan con un .m3u que lista sus .chd.
+
+CHD_SOURCES = (".cue", ".gdi")
+DISC_RE = re.compile(r"\s*\((?:Disc|Disco|CD)\s*(\d+)(?:\s*of\s*\d+)?\)", re.I)
+_chd_job = {"running": False, "finished": False, "current": None, "percent": 0, "done": 0,
+            "total": 0, "converted": [], "m3u": [], "errors": [], "saved": 0}
+
+
+def find_chdman(cfg):
+    for cand in (cfg.get("chdman_path"), APP_DIR / "chdman.exe", APP_DIR / "chdman",
+                 shutil.which("chdman")):
+        if cand and Path(cand).is_file():
+            return str(cand)
+    return None
+
+
+def cue_tracks(cue):
+    """Archivos que referencia un .cue (normalmente los .bin)."""
+    text = Path(cue).read_text(encoding="utf-8", errors="replace")
+    return [Path(cue).with_name(m) for m in re.findall(r'^\s*FILE\s+"([^"]+)"', text, re.M | re.I)]
+
+
+def gdi_tracks(gdi):
+    out = []
+    for line in Path(gdi).read_text(encoding="utf-8", errors="replace").splitlines()[1:]:
+        m = re.match(r'\s*\d+\s+\d+\s+\d+\s+\d+\s+("([^"]+)"|(\S+))', line)
+        if m:
+            out.append(Path(gdi).with_name(m.group(2) or m.group(3)))
+    return out
+
+
+def chd_candidates(inbox):
+    if not inbox or not Path(inbox).is_dir():
+        return []
+    return sorted(e.name for e in os.scandir(inbox)
+                  if e.is_file() and Path(e.name).suffix.lower() in CHD_SOURCES)
+
+
+def run_chdman(chdman, src, dest):
+    """Ejecuta chdman y va leyendo el porcentaje ('Compressing, 45.2% complete')."""
+    cmd = [chdman, "createcd", "-i", str(src), "-o", str(dest)]
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    buf, tail = b"", b""
+    while True:
+        ch = proc.stderr.read(1)
+        if not ch:
+            break
+        if ch in b"\r\n":
+            m = re.search(rb"(\d+(?:\.\d+)?)% complete", buf)
+            if m:
+                _chd_job["percent"] = float(m.group(1))
+            if buf.strip():
+                tail = buf
+            buf = b""
+        else:
+            buf += ch
+    if proc.wait() != 0:
+        raise RuntimeError((tail or buf).decode("utf-8", "replace").strip() or f"chdman termino con error {proc.returncode}")
+
+
+def chd_worker(cfg, names):
+    job = _chd_job
+    job.update(running=True, finished=False, current=None, percent=0, done=0, total=len(names),
+               converted=[], m3u=[], errors=[], saved=0)
+    try:
+        chdman = find_chdman(cfg)
+        inbox = Path(cfg["inbox_path"])
+        done_dir = inbox / "originales-convertidos"
+        made = []
+        for name in names:
+            job.update(current=name, percent=0)
+            try:
+                src = safe_child(inbox, name)
+                tracks = cue_tracks(src) if src.suffix.lower() == ".cue" else gdi_tracks(src)
+                missing = [t.name for t in tracks if not t.is_file()]
+                if missing:
+                    raise FileNotFoundError("faltan pistas: " + ", ".join(missing))
+                dest = src.with_suffix(".chd")
+                if dest.exists():
+                    raise FileExistsError(f"{dest.name} ya existe")
+                tmp = src.with_name(src.stem + ".chd.tmp")
+                tmp.unlink(missing_ok=True)
+                run_chdman(chdman, src, tmp)
+                os.replace(tmp, dest)
+                before = sum(t.stat().st_size for t in tracks) + src.stat().st_size
+                job["saved"] += max(0, before - dest.stat().st_size)
+                done_dir.mkdir(exist_ok=True)
+                for f in [src, *tracks]:  # los originales no se borran: se apartan
+                    if f.exists():
+                        os.replace(f, done_dir / f.name)
+                job["converted"].append(dest.name)
+                made.append(dest.name)
+            except Exception as exc:  # noqa: BLE001
+                Path(inbox / (Path(name).stem + ".chd.tmp")).unlink(missing_ok=True)
+                job["errors"].append(f"{name}: {exc}")
+            job["done"] += 1
+        # multidisco: "Juego (USA) (Disc 1).chd" + "(Disc 2)" -> "Juego (USA).m3u"
+        groups = {}
+        for chd in sorted(os.listdir(inbox)):
+            if chd.lower().endswith(".chd") and DISC_RE.search(chd):
+                groups.setdefault(DISC_RE.sub("", Path(chd).stem).strip(), []).append(chd)
+        for title, discs in groups.items():
+            m3u = inbox / (title + ".m3u")
+            if len(discs) > 1 and not m3u.exists() and any(d in made for d in discs):
+                discs.sort(key=lambda d: int(DISC_RE.search(d).group(1)))
+                m3u.write_text("\n".join(discs) + "\n", encoding="utf-8")
+                job["m3u"].append(m3u.name)
+    finally:
+        job.update(running=False, finished=True, current=None)
+
+
+# ---------------------------------------------------------------- tienda homebrew
+# Homebrew Hub (hh.gbdev.io, comunidad gbdev): juegos libres/gratuitos de GB, GBC y GBA
+# subidos por sus autores. Solo se instala lo que eliges, con su captura como caratula.
+
+HH_API = "https://hh3.gbdev.io/api/search"
+HH_STATIC = "https://hh3.gbdev.io/static/"
+HH_PLATFORMS = {"GB": "gb", "GBC": "gbc", "GBA": "gba"}
+HH_EXTS = {".gb", ".gbc", ".gba", ".cgb", ".sgb"}
+_hh_cache = {}  # slug -> entrada, rellenado por las busquedas
+
+
+def hh_playable(entry):
+    files = [f for f in entry.get("files") or [] if f.get("playable")
+             and Path(f.get("filename", "")).suffix.lower() in HH_EXTS]
+    files.sort(key=lambda f: not f.get("default"))
+    return files[0]["filename"] if files else None
+
+
+def hh_developer(entry):
+    """El autor viene como texto o como lista de {name, ...} segun la entrada."""
+    dev = entry.get("developer") or []
+    if isinstance(dev, str):
+        return dev
+    return ", ".join(d.get("name", "") if isinstance(d, dict) else str(d) for d in dev)
+
+
+def hh_rom_name(entry, filename):
+    title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", entry.get("title") or entry["slug"]).strip(" .") or entry["slug"]
+    ext = Path(filename).suffix.lower()
+    return title + (".gbc" if ext == ".cgb" else ".gb" if ext == ".sgb" else ext)
+
+
+def hh_search(cfg, q="", platform="", page=1):
+    params = {"typetag": "game", "page": max(1, int(page))}
+    if q:
+        params["q"] = q[:80]
+    if platform in HH_PLATFORMS:
+        params["platform"] = platform
+    data = json.loads(fetch(HH_API + "?" + urllib.parse.urlencode(params), 20))
+    roms = Path(cfg["roms_path"]) if cfg.get("roms_path") else None
+    items = []
+    for e in data.get("entries", []):
+        _hh_cache[e["slug"]] = e
+        f = hh_playable(e)
+        system = HH_PLATFORMS.get(e.get("platform"))
+        shots = e.get("screenshots") or []
+        installed = bool(f and system and roms and (roms / system / hh_rom_name(e, f)).is_file())
+        items.append({
+            "slug": e["slug"], "title": e.get("title"), "platform": e.get("platform"),
+            "developer": hh_developer(e),
+            "description": (e.get("description") or "")[:400], "tags": e.get("tags") or [],
+            "date": e.get("date"), "website": e.get("website") or e.get("repository"),
+            "screenshot": (f"{HH_STATIC}{e['basepath']}/entries/{urllib.parse.quote(e['slug'])}/"
+                           f"{urllib.parse.quote(shots[0])}") if shots else None,
+            "installable": bool(f and system), "installed": installed,
+        })
+    return {"items": items, "page": data.get("page_current", 1), "pages": data.get("page_total", 1),
+            "results": data.get("results", 0)}
+
+
+def hh_install(cfg, slug):
+    e = _hh_cache.get(slug)
+    if not e:
+        raise ValueError("Vuelve a buscar el juego y prueba otra vez.")
+    roms = Path(cfg["roms_path"]) if cfg.get("roms_path") else None
+    if not (roms and roms.is_dir()):
+        raise ValueError("Configura primero la carpeta de ROMs.")
+    system, f = HH_PLATFORMS.get(e.get("platform")), hh_playable(e)
+    if not (system and f) or "/" in f or "\\" in f:
+        raise ValueError("Este juego no tiene un archivo instalable.")
+    base = f"{HH_STATIC}{e['basepath']}/entries/{urllib.parse.quote(slug)}/"
+    folder = roms / system
+    folder.mkdir(exist_ok=True)
+    rom = folder / hh_rom_name(e, f)
+    if rom.exists():
+        raise FileExistsError("ya esta instalado")
+    data = fetch(base + urllib.parse.quote(f), 60)
+    if len(data) < 256:
+        raise ValueError("descarga incompleta")
+    rom.write_bytes(data)
+    fields = {"name": e.get("title"), "desc": e.get("description"),
+              "developer": hh_developer(e)}
+    shots = [s for s in e.get("screenshots") or [] if Path(s).suffix.lower() in (".png", ".jpg", ".jpeg", ".bmp", ".gif")]
+    if shots:
+        try:
+            img = fetch(base + urllib.parse.quote(shots[0]), 30)
+            local = folder / "images" / (rom.stem + Path(shots[0]).suffix.lower())
+            local.parent.mkdir(exist_ok=True)
+            local.write_bytes(img)
+            fields["image"] = "./images/" + local.name
+        except Exception:  # noqa: BLE001 — sin captura tambien vale
+            pass
+    update_gamelist(folder, {rom.name: fields})
+    return {"installed": rom.name, "system": system}
 
 
 # ---------------------------------------------------------------- actualizaciones
@@ -593,7 +815,7 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 cfg = load_config()
                 if self.path == "/api/config":
-                    for key in ("roms_path", "inbox_path"):
+                    for key in ("roms_path", "inbox_path", "chdman_path"):
                         if key in body:
                             cfg[key] = str(body[key]).strip().strip('"')
                     if cfg["inbox_path"]:
@@ -625,6 +847,20 @@ class Handler(BaseHTTPRequestHandler):
                     _art_job["running"] = True
                     threading.Thread(target=art_worker, args=(cfg["roms_path"], systems), daemon=True).start()
                     return self._send(200, {"ok": True})
+                if self.path == "/api/chd/start":
+                    if _chd_job["running"]:
+                        return self._send(200, {"ok": True})
+                    if not find_chdman(cfg):
+                        raise ValueError("No encuentro chdman.exe (ver instrucciones en Entrada).")
+                    names = [n for n in body.get("names") or chd_candidates(cfg["inbox_path"])
+                             if Path(n).suffix.lower() in CHD_SOURCES]
+                    _chd_job["running"] = True
+                    threading.Thread(target=chd_worker, args=(cfg, names), daemon=True).start()
+                    return self._send(200, {"ok": True})
+                if self.path == "/api/hb/search":
+                    return self._send(200, hh_search(cfg, body.get("q", ""), body.get("platform", ""), body.get("page", 1)))
+                if self.path == "/api/hb/install":
+                    return self._send(200, hh_install(cfg, str(body.get("slug", ""))))
                 if self.path == "/api/open":
                     target = cfg.get(body.get("which", ""), "")
                     if target and os.name == "nt" and Path(target).is_dir():
