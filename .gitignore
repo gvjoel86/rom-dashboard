@@ -1,0 +1,5 @@
+config.json
+*.old
+*.new
+.reiniciando
+__pycache__/

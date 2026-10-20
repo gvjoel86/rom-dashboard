@@ -1,0 +1,9 @@
+{
+  "version": "1.0.0",
+  "notes": "Primera versión",
+  "files": {
+    "rom_dashboard.py": "34eefa85cdf853c03e647351e9e174e09098811e70d00dddde2fd3415db7c06e",
+    "dashboard.html": "d77c138cf82b19afda2e206deef8e5c2979b2cdef4bc520e7fd78c11c3e9a8e2",
+    "LEEME.txt": "bc4dca0ecdbed064e820cb8670d857547f0170385ab89fa1245decd09ebe43ae"
+  }
+}

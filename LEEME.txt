@@ -1,0 +1,21 @@
+ROM Dashboard - R36S Plus / ArkOS
+=================================
+
+1. Instala Python 3 desde la Microsoft Store ("Python 3.13"): asi se actualiza solo.
+2. Doble clic en "Iniciar Dashboard.bat". Se abre el navegador en http://127.0.0.1:8765
+3. Pulsa "Configuracion":
+   - Carpeta de ROMs: la unidad EASYROMS de la SD (p. ej. E:\)
+     o, por WiFi, \\IP-de-la-consola\roms  (en la consola: Options > Enable Remote Services)
+   - Carpeta de entrada: donde dejaras los juegos nuevos (por defecto Descargas\ROMs-entrada)
+4. Deja ROMs en la carpeta de entrada, revisa el sistema sugerido y pulsa "Copiar".
+5. Al terminar, cierra la ventana negra. Expulsa la SD de forma segura antes de sacarla.
+
+Notas
+- No necesita instalar nada mas. Solo funciona en tu PC (127.0.0.1). Internet solo
+  se usa para buscar actualizaciones.
+- Nunca sobrescribe: si un juego ya existe en la consola, lo avisa y no lo copia.
+- Las BIOS se comprueban por nombre exacto y MD5. "hash distinto" puede ser otra revision valida.
+- Actualizaciones: al abrirse busca version nueva en github.com/gvjoel86/rom-dashboard
+  y muestra un aviso. Solo se instala si pulsas "Actualizar ahora" (verifica SHA-256,
+  guarda la version anterior como *.old y no toca tu configuracion).
+- La configuracion se guarda en config.json junto al programa.
